@@ -14,4 +14,4 @@ ruby box2s3 pattern_to_match s3_bucket_name path_within_s3_bucket
 -configure your box.com username/password within the script
 
 ###license###
-(MIT)[http://opensource.org/licenses/MIT]
+[MIT](http://opensource.org/licenses/MIT)
