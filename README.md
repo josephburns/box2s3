@@ -1,4 +1,4 @@
-box2s3
+###box2s3###
 
 a brutish hack to move files from box.com to an AWS s3 bucket.  move all files matching a certain pattern from box.net to a desired s3 bucket/path.  uses oauth2 in an unnatural way since their api v2 requires it.      
 tested with ruby 1.9.3
