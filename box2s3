@@ -1,0 +1,120 @@
+require 'net/http'
+require 'mechanize'
+require 'json'
+require 'httparty'
+require 'aws-sdk'
+
+CLIENT_ID = 'your_client_id'
+CLIENT_SECRET = 'your_client_secret'
+
+BOX_USER_NAME = 'your_box_username'
+BOX_PASSWORD = 'your_box_password'
+
+AWS_ACCESS_KEY_ID = 'your_aws_access_key_id'
+AWS_SECRET_ACCESS_KEY = 'your_aws_secret'
+
+API_ENDPOINT = 'https://api.box.com/2.0'
+AUTH_URL = 'https://www.box.com/api/oauth2/authorize'
+ACCESS_URL = 'https://www.box.com/api/oauth2/token'
+
+FILE_LIMIT = 500 # bump up if you have more than this
+
+query = ARGV[0]
+bucket = ARGV[1]
+bucket_path = ARGV[2]
+
+AWS.config({
+  :access_key_id => AWS_ACCESS_KEY_ID,
+  :secret_access_key => AWS_SECRET_ACCESS_KEY
+})
+
+# yes, oauth2 is not supposed to be used this way
+def get_access_token_response
+  params = {
+    'response_type' => 'code',
+    'client_id' => "#{CLIENT_ID}",
+    'state' => 'authenticated'
+  }
+
+  param_list = []
+  params.keys.map{|key| param_list << "#{key}=#{params[key]}"}
+  auth_url = AUTH_URL << '?' << param_list.join('&')
+
+  a = Mechanize.new { |agent|
+    agent.user_agent_alias = 'Mac Safari'
+  }
+
+  response = nil
+
+  a.get(auth_url) do |auth_response_page|
+    login_result = auth_response_page.form_with(:name => 'login_form1') do |f|
+      f.login = BOX_USER_NAME
+      f.password = BOX_PASSWORD
+    end.submit
+
+    # do not follow redirect this time
+    a.redirect_ok = false
+    
+    # code to exchange for an access token
+    code = ''
+
+    consent_result = login_result.form_with(:name => 'consent_form') do |f|
+      accepted_response = f.submit(f.buttons.first)
+      code = accepted_response.header["location"].split('=').last
+    end
+
+    access_params = {
+      :body => {
+        'grant_type' => 'authorization_code',
+        'code' => code,
+        'client_id' => CLIENT_ID,
+        'client_secret' => CLIENT_SECRET
+      }
+    }
+
+    response = HTTParty.post(ACCESS_URL, access_params)
+    # now have the access token and refresh token in response in the following format:
+    # {
+    #   "access_token": "T9cE5asGnuyYCCqIZFoWjFHvNbvVqHjl",
+    #   "expires_in": 3600,
+    #   "token_type": "bearer",
+    #   "refresh_token": "J7rxTiWOHMoSC1isKZKBZWizoRXjkQzig5C6jFgCVJ9bUnsUfGMinKBDLZWP9BgR"
+    # }
+  end
+  JSON.parse(response.body)
+end
+
+access_token_response = get_access_token_response
+
+# do a search for all files with query in filename
+operation = API_ENDPOINT + '/search'
+params = {:query => query,:limit => FILE_LIMIT} 
+response = HTTParty.get(operation, :query => params, :headers => {"Authorization" => "Bearer #{access_token_response["access_token"]}"})
+
+file_hash = {}
+
+response["entries"].map {|x| file_hash[x["id"]] = x["name"]}
+
+# the heavy lifting: get file from box.net to s3
+s3 = AWS::S3.new
+bucket = s3.buckets[bucket]
+get_file = API_ENDPOINT + '/files'
+
+file_hash.keys.each do |id|
+  begin
+  access_token_response ||= get_access_token_response # ensure a fresh token given how long each iteration might take
+  get_file_content = get_file + '/' + id + '/content'
+  object = bucket.objects[bucket_path + '/' + file_hash[id]]
+  if !object.exists? # skip if written previously
+    puts "writing file #{id}: #{file_hash[id]} to drop folder on s3"
+    object.write(HTTParty.get(get_file_content, :headers => {"Authorization" => "Bearer #{access_token_response["access_token"]}"}))
+  else
+    puts "file already exists - #{id}: #{file_hash[id]} to drop folder on s3"
+  end
+  rescue => exception 
+    puts "Net::HTTP::Persistent::Error trying #{id}: #{file_hash[id]} - skipping" 
+    puts exception.backtrace
+    access_token_response = nil 
+    next 
+  end
+end
